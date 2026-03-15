@@ -5,14 +5,14 @@
 //! The iframe renders those steps then calls `chat_continue` to resume.  This
 //! gives the user real-time feedback instead of waiting for the full loop.
 
-use crate::{CommandResponse, PluginConfig, storage_get, storage_set};
+use diaryx_plugin_sdk::prelude::*;
+use crate::PluginConfig;
 use serde_json::Value as JsonValue;
 
 const LEGACY_HISTORY_KEY: &str = "diaryx.ai.history";
 const INDEX_KEY: &str = "diaryx.ai.conversations.index";
 const CONV_PREFIX: &str = "diaryx.ai.conversations.";
 const MAX_HISTORY_MESSAGES: usize = 50;
-const MAX_CONVERSATIONS: usize = 50;
 const MAX_AGENT_ITERATIONS: usize = 10;
 const MAX_TOOL_RESULT_BYTES: usize = 8192;
 const DEFAULT_BYO_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -66,6 +66,8 @@ pub struct ConversationMeta {
     pub title: String,
     pub created_at: u64,
     pub message_count: usize,
+    #[serde(default)]
+    pub file_path: Option<String>,
 }
 
 /// Top-level index of all conversations.
@@ -134,14 +136,14 @@ std::thread_local! {
 // ============================================================================
 
 fn load_index() -> ConversationIndex {
-    storage_get(INDEX_KEY)
-        .and_then(|bytes| serde_json::from_slice::<ConversationIndex>(&bytes).ok())
+    host::storage::get_json::<ConversationIndex>(INDEX_KEY)
+        .ok()
+        .flatten()
         .unwrap_or_default()
 }
 
 fn save_index(index: &ConversationIndex) {
-    let bytes = serde_json::to_vec(index).unwrap_or_default();
-    storage_set(INDEX_KEY, &bytes);
+    let _ = host::storage::set_json(INDEX_KEY, index);
 }
 
 fn conv_storage_key(id: &str) -> String {
@@ -149,8 +151,9 @@ fn conv_storage_key(id: &str) -> String {
 }
 
 fn load_conversation_messages(id: &str) -> Vec<ChatMessage> {
-    storage_get(&conv_storage_key(id))
-        .and_then(|bytes| serde_json::from_slice::<Vec<ChatMessage>>(&bytes).ok())
+    host::storage::get_json::<Vec<ChatMessage>>(&conv_storage_key(id))
+        .ok()
+        .flatten()
         .unwrap_or_default()
 }
 
@@ -162,12 +165,12 @@ fn save_conversation_messages(id: &str, messages: &[ChatMessage]) {
     } else {
         messages
     };
-    let bytes = serde_json::to_vec(trimmed).unwrap_or_default();
-    storage_set(&conv_storage_key(id), &bytes);
+    let trimmed_vec: Vec<_> = trimmed.to_vec();
+    let _ = host::storage::set_json(&conv_storage_key(id), &trimmed_vec);
 }
 
 fn delete_conversation_messages(id: &str) {
-    storage_set(&conv_storage_key(id), &[]);
+    let _ = host::storage::delete(&conv_storage_key(id));
 }
 
 fn generate_conversation_id() -> String {
@@ -202,13 +205,14 @@ fn generate_title(first_user_message: &str) -> String {
 
 fn migrate_if_needed() {
     // Already migrated?
-    if storage_get(INDEX_KEY).is_some() {
+    if host::storage::get(INDEX_KEY).ok().flatten().is_some() {
         return;
     }
 
     // Check for legacy flat history
-    let legacy = storage_get(LEGACY_HISTORY_KEY)
-        .and_then(|bytes| serde_json::from_slice::<Vec<ChatMessage>>(&bytes).ok())
+    let legacy = host::storage::get_json::<Vec<ChatMessage>>(LEGACY_HISTORY_KEY)
+        .ok()
+        .flatten()
         .unwrap_or_default();
 
     if legacy.is_empty() {
@@ -229,6 +233,7 @@ fn migrate_if_needed() {
         title,
         created_at: 0,
         message_count: legacy.len(),
+        file_path: None,
     };
 
     save_conversation_messages(&id, &legacy);
@@ -268,6 +273,7 @@ unsafe extern "C" {
     fn host_http_request(offset: u64) -> u64;
     fn host_read_file(offset: u64) -> u64;
     fn host_list_files(offset: u64) -> u64;
+    fn host_write_file(offset: u64) -> u64;
 }
 
 fn call_host_http_request(input: &str) -> String {
@@ -302,6 +308,15 @@ fn call_host_list_files(prefix: &str) -> String {
         extism_pdk::Memory::find(result_offset)
             .map(|m| String::from_utf8(m.to_vec()).unwrap_or_default())
             .unwrap_or_default()
+    }
+}
+
+fn call_host_write_file(path: &str, content: &str) {
+    let input = serde_json::json!({ "path": path, "content": content }).to_string();
+    unsafe {
+        let mem = extism_pdk::Memory::from_bytes(input.as_bytes())
+            .expect("failed to allocate memory for write_file");
+        host_write_file(mem.offset());
     }
 }
 
@@ -402,6 +417,7 @@ fn plugin_error(code: &str, message: impl Into<String>) -> CommandResponse {
         success: false,
         data: Some(serde_json::json!({ "code": code })),
         error: Some(message.into()),
+        error_code: None,
     }
 }
 
@@ -409,7 +425,8 @@ fn is_managed_mode(config: &PluginConfig) -> bool {
     config
         .provider_mode
         .as_deref()
-        .is_some_and(|mode| mode.eq_ignore_ascii_case("managed"))
+        .map(|mode| mode.eq_ignore_ascii_case("managed"))
+        .unwrap_or(true)
 }
 
 fn build_byo_url(endpoint: &str) -> String {
@@ -579,11 +596,7 @@ fn build_response(state: &AgentState, final_text: Option<&str>) -> CommandRespon
         data["steps"] = serde_json::to_value(&state.steps).unwrap_or_default();
     }
 
-    CommandResponse {
-        success: true,
-        data: Some(data),
-        error: None,
-    }
+    CommandResponse::ok(data)
 }
 
 // ============================================================================
@@ -608,13 +621,13 @@ pub fn handle_chat(input: ChatInput, config: &PluginConfig) -> CommandResponse {
         if server_url.trim().is_empty() || auth_token.trim().is_empty() || tier.trim().is_empty() {
             return plugin_error(
                 "managed_unavailable",
-                "Managed mode requires an authenticated Diaryx sync session.",
+                "Sign in to Diaryx Sync to use AI. Alternatively, you can use your own API key by switching to \"Bring your own API key\" in Settings \u{2192} AI.",
             );
         }
         if !tier.eq_ignore_ascii_case("plus") {
             return plugin_error(
                 "plus_required",
-                "Diaryx Plus is required to use managed AI.",
+                "Subscribe to Diaryx Plus to use AI. You can also bring your own API key in Settings \u{2192} AI.",
             );
         }
 
@@ -728,11 +741,7 @@ pub fn handle_chat(input: ChatInput, config: &PluginConfig) -> CommandResponse {
         }
         IterationResult::Error(e) => {
             AGENT_STATE.with(|s| *s.borrow_mut() = None);
-            CommandResponse {
-                success: false,
-                data: None,
-                error: Some(e),
-            }
+            CommandResponse::err(e)
         }
     }
 }
@@ -744,20 +753,12 @@ pub fn chat_continue(_managed: Option<ManagedContext>) -> CommandResponse {
     let mut state = match AGENT_STATE.with(|s| s.borrow_mut().take()) {
         Some(s) => s,
         None => {
-            return CommandResponse {
-                success: false,
-                data: None,
-                error: Some("No agent loop in progress".into()),
-            };
+            return CommandResponse::err("No agent loop in progress");
         }
     };
 
     if state.iterations >= MAX_AGENT_ITERATIONS {
-        return CommandResponse {
-            success: false,
-            data: None,
-            error: Some("Agent reached maximum iterations without a final response".into()),
-        };
+        return CommandResponse::err("Agent reached maximum iterations without a final response");
     }
 
     match run_one_iteration(&mut state) {
@@ -772,18 +773,17 @@ pub fn chat_continue(_managed: Option<ManagedContext>) -> CommandResponse {
         }
         IterationResult::Error(e) => {
             AGENT_STATE.with(|s| *s.borrow_mut() = None);
-            CommandResponse {
-                success: false,
-                data: None,
-                error: Some(e),
-            }
+            CommandResponse::err(e)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatInput, build_byo_url, build_managed_url, handle_chat};
+    use super::{
+        ChatInput, ChatMessage, build_byo_url, build_managed_url, handle_chat,
+        render_conversation_markdown, replace_entry_body,
+    };
     use crate::PluginConfig;
 
     #[test]
@@ -861,17 +861,44 @@ mod tests {
             Some("plus_required")
         );
     }
+
+    #[test]
+    fn replace_entry_body_preserves_frontmatter() {
+        let existing = "---\ntitle: Chat\npart_of: root.md\n---\n\n# Old\n";
+        let updated = replace_entry_body(existing, "# New\n\nHello");
+
+        assert!(updated.starts_with("---\ntitle: Chat\npart_of: root.md\n---\n\n"));
+        assert!(updated.contains("# New\n\nHello\n"));
+        assert!(!updated.contains("# Old"));
+    }
+
+    #[test]
+    fn render_conversation_markdown_includes_headings() {
+        let markdown = render_conversation_markdown(
+            "Planning Chat",
+            &[
+                ChatMessage {
+                    role: "user".into(),
+                    content: "Help me plan".into(),
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "Sure".into(),
+                },
+            ],
+        );
+
+        assert!(markdown.contains("# Planning Chat"));
+        assert!(markdown.contains("### User"));
+        assert!(markdown.contains("### Assistant"));
+    }
 }
 
 /// Return the full conversation history.
 pub fn get_history() -> CommandResponse {
     ensure_loaded();
     let messages = CONVERSATION.with(|conv| conv.borrow().messages.clone());
-    CommandResponse {
-        success: true,
-        data: Some(serde_json::to_value(&messages).unwrap_or_default()),
-        error: None,
-    }
+    CommandResponse::ok(serde_json::to_value(&messages).unwrap_or_default())
 }
 
 /// Delete the active conversation (or reset if none active).
@@ -893,11 +920,7 @@ pub fn clear_conversation() -> CommandResponse {
         conv.messages.clear();
     });
     AGENT_STATE.with(|s| *s.borrow_mut() = None);
-    CommandResponse {
-        success: true,
-        data: None,
-        error: None,
-    }
+    CommandResponse::ok_empty()
 }
 
 // ============================================================================
@@ -908,11 +931,7 @@ pub fn clear_conversation() -> CommandResponse {
 pub fn list_conversations() -> CommandResponse {
     ensure_loaded();
     let index = load_index();
-    CommandResponse {
-        success: true,
-        data: Some(serde_json::to_value(&index).unwrap_or_default()),
-        error: None,
-    }
+    CommandResponse::ok(serde_json::to_value(&index).unwrap_or_default())
 }
 
 /// Switch to a different conversation by id.
@@ -921,11 +940,7 @@ pub fn switch_conversation(id: &str) -> CommandResponse {
     let exists = index.conversations.iter().any(|c| c.id == id);
 
     if !exists {
-        return CommandResponse {
-            success: false,
-            data: None,
-            error: Some(format!("Conversation not found: {}", id)),
-        };
+        return CommandResponse::err(format!("Conversation not found: {}", id));
     }
 
     index.active_id = Some(id.to_string());
@@ -939,32 +954,41 @@ pub fn switch_conversation(id: &str) -> CommandResponse {
         conv.messages = messages.clone();
     });
 
-    CommandResponse {
-        success: true,
-        data: Some(serde_json::to_value(&messages).unwrap_or_default()),
-        error: None,
-    }
+    CommandResponse::ok(serde_json::to_value(&messages).unwrap_or_default())
 }
 
-/// Start a new empty conversation (doesn't persist until first message).
-pub fn new_conversation() -> CommandResponse {
-    // Update index to clear active_id
+/// Start a new empty conversation backed by a workspace file.
+pub fn new_conversation(title: &str, file_path: Option<String>) -> CommandResponse {
+    ensure_loaded();
+
+    let trimmed_title = title.trim();
+    if trimmed_title.is_empty() {
+        return CommandResponse::err("A conversation title is required");
+    }
+
+    let id = generate_conversation_id();
+    let meta = ConversationMeta {
+        id: id.clone(),
+        title: trimmed_title.to_string(),
+        created_at: 0,
+        message_count: 0,
+        file_path,
+    };
+
     let mut index = load_index();
-    index.active_id = None;
+    index.conversations.insert(0, meta.clone());
+    index.active_id = Some(id.clone());
     save_index(&index);
 
     CONVERSATION.with(|conv| {
         let mut conv = conv.borrow_mut();
-        conv.id = None;
+        conv.id = Some(id);
         conv.messages.clear();
+        conv.loaded = true;
     });
     AGENT_STATE.with(|s| *s.borrow_mut() = None);
 
-    CommandResponse {
-        success: true,
-        data: None,
-        error: None,
-    }
+    CommandResponse::ok(serde_json::to_value(&meta).unwrap_or_default())
 }
 
 /// Delete a specific conversation by id.
@@ -972,11 +996,7 @@ pub fn delete_conversation(id: &str) -> CommandResponse {
     let mut index = load_index();
 
     if !index.conversations.iter().any(|c| c.id == id) {
-        return CommandResponse {
-            success: false,
-            data: None,
-            error: Some(format!("Conversation not found: {}", id)),
-        };
+        return CommandResponse::err(format!("Conversation not found: {}", id));
     }
 
     delete_conversation_messages(id);
@@ -998,11 +1018,7 @@ pub fn delete_conversation(id: &str) -> CommandResponse {
         AGENT_STATE.with(|s| *s.borrow_mut() = None);
     }
 
-    CommandResponse {
-        success: true,
-        data: None,
-        error: None,
-    }
+    CommandResponse::ok_empty()
 }
 
 // ============================================================================
@@ -1028,6 +1044,7 @@ fn persist_exchange(user_message: &str, assistant_text: &str) {
             save_conversation_messages(id, &conv.messages);
             if let Some(meta) = index.conversations.iter_mut().find(|c| c.id == *id) {
                 meta.message_count = conv.messages.len();
+                sync_conversation_file(meta, &conv.messages);
             }
             save_index(&index);
         } else {
@@ -1039,16 +1056,10 @@ fn persist_exchange(user_message: &str, assistant_text: &str) {
                 title,
                 created_at: 0, // no timestamp host fn available
                 message_count: conv.messages.len(),
+                file_path: None,
             };
 
             save_conversation_messages(&id, &conv.messages);
-
-            // Enforce max conversations — remove oldest if at limit
-            if index.conversations.len() >= MAX_CONVERSATIONS {
-                if let Some(removed) = index.conversations.pop() {
-                    delete_conversation_messages(&removed.id);
-                }
-            }
 
             index.conversations.insert(0, meta);
             index.active_id = Some(id.clone());
@@ -1057,4 +1068,90 @@ fn persist_exchange(user_message: &str, assistant_text: &str) {
             conv.id = Some(id);
         }
     });
+}
+
+fn sync_conversation_file(meta: &ConversationMeta, messages: &[ChatMessage]) {
+    let Some(path) = meta.file_path.as_deref() else {
+        return;
+    };
+
+    let existing = call_host_read_file(path);
+    if existing.is_empty() {
+        return;
+    }
+
+    let body = render_conversation_markdown(&meta.title, messages);
+    let merged = replace_entry_body(&existing, &body);
+    call_host_write_file(path, &merged);
+}
+
+fn render_conversation_markdown(title: &str, messages: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    out.push_str("# ");
+    out.push_str(title.trim());
+    out.push_str("\n\n");
+    out.push_str("_This conversation is managed by the AI Assistant plugin._\n\n");
+    out.push_str("## Conversation\n\n");
+
+    for (idx, message) in messages.iter().enumerate() {
+        out.push_str("### ");
+        out.push_str(role_heading(&message.role));
+        out.push_str("\n\n");
+        out.push_str(message.content.trim_end());
+        out.push('\n');
+        if idx + 1 < messages.len() {
+            out.push_str("\n---\n\n");
+        }
+    }
+
+    out
+}
+
+fn role_heading(role: &str) -> &str {
+    match role {
+        "assistant" => "Assistant",
+        "user" => "User",
+        _ => "Message",
+    }
+}
+
+fn replace_entry_body(existing: &str, new_body: &str) -> String {
+    let (frontmatter, _) = split_frontmatter(existing);
+    let body = format!("{}\n", new_body.trim_end());
+    if frontmatter.is_empty() {
+        return body;
+    }
+
+    let mut merged = frontmatter;
+    if !merged.ends_with("\n\n") {
+        if !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        merged.push('\n');
+    }
+    merged.push_str(&body);
+    merged
+}
+
+fn split_frontmatter(content: &str) -> (String, &str) {
+    let line_ending = if content.starts_with("---\r\n") {
+        "\r\n"
+    } else if content.starts_with("---\n") {
+        "\n"
+    } else {
+        return (String::new(), content);
+    };
+
+    let start = 3 + line_ending.len();
+    let marker = format!("{}---", line_ending);
+    let Some(rel_end) = content[start..].find(&marker) else {
+        return (String::new(), content);
+    };
+
+    let mut end = start + rel_end + marker.len();
+    while content[end..].starts_with(line_ending) {
+        end += line_ending.len();
+    }
+
+    (content[..end].to_string(), &content[end..])
 }

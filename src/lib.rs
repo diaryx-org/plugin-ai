@@ -6,46 +6,12 @@
 
 pub mod chat;
 
+use diaryx_plugin_sdk::prelude::*;
 use extism_pdk::*;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
-// ============================================================================
-// Protocol types (mirrors diaryx_extism::protocol)
-// ============================================================================
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct GuestManifest {
-    id: String,
-    name: String,
-    version: String,
-    description: String,
-    capabilities: Vec<String>,
-    #[serde(default)]
-    requested_permissions: Option<JsonValue>,
-    #[serde(default)]
-    ui: Vec<JsonValue>,
-    #[serde(default)]
-    commands: Vec<String>,
-    #[serde(default)]
-    cli: Vec<JsonValue>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CommandRequest {
-    command: String,
-    params: JsonValue,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct CommandResponse {
-    pub success: bool,
-    #[serde(default)]
-    pub data: Option<JsonValue>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-/// Plugin configuration stored via host_storage_get/set.
+/// Plugin configuration stored via host storage.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct PluginConfig {
     pub provider_mode: Option<String>,
@@ -57,139 +23,60 @@ pub struct PluginConfig {
 }
 
 // ============================================================================
-// Host storage FFI + reusable helpers
+// Config helpers
 // ============================================================================
 
-#[link(wasm_import_module = "extism:host/user")]
-unsafe extern "C" {
-    fn host_storage_get(offset: u64) -> u64;
-    fn host_storage_set(offset: u64) -> u64;
-}
-
-/// Read bytes from host storage by key (base64-decoded).
-pub(crate) fn storage_get(key: &str) -> Option<Vec<u8>> {
-    let input = serde_json::json!({ "key": key });
-    let input_str = serde_json::to_string(&input).unwrap_or_default();
-
-    let result = unsafe {
-        let mem = Memory::from_bytes(input_str.as_bytes()).expect("failed to allocate memory");
-        let result_offset = host_storage_get(mem.offset());
-        Memory::find(result_offset)
-            .map(|m| String::from_utf8(m.to_vec()).unwrap_or_default())
-            .unwrap_or_default()
-    };
-
-    if result.is_empty() {
-        return None;
-    }
-
-    #[derive(serde::Deserialize)]
-    struct StorageResult {
-        #[serde(default)]
-        data: Option<String>,
-    }
-
-    if let Ok(storage) = serde_json::from_str::<StorageResult>(&result) {
-        if let Some(b64) = storage.data {
-            return base64_decode(&b64).ok();
-        }
-    }
-
-    None
-}
-
-/// Write bytes to host storage by key (base64-encoded).
-pub(crate) fn storage_set(key: &str, data: &[u8]) {
-    let b64 = base64_encode(data);
-    let input = serde_json::json!({ "key": key, "data": b64 });
-    let input_str = serde_json::to_string(&input).unwrap_or_default();
-
-    unsafe {
-        let mem = Memory::from_bytes(input_str.as_bytes()).expect("failed to allocate memory");
-        host_storage_set(mem.offset());
-    }
-}
-
 fn load_config() -> PluginConfig {
-    storage_get("diaryx.ai.config")
-        .and_then(|bytes| serde_json::from_slice::<PluginConfig>(&bytes).ok())
+    host::storage::get_json::<PluginConfig>("diaryx.ai.config")
+        .ok()
+        .flatten()
         .unwrap_or_default()
 }
 
 fn save_config(config: &PluginConfig) {
-    let json_bytes = serde_json::to_vec(config).unwrap_or_default();
-    storage_set("diaryx.ai.config", &json_bytes);
+    let _ = host::storage::set_json("diaryx.ai.config", config);
 }
 
-// Minimal base64 encode/decode (no dependency needed)
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
+fn is_managed_mode(config: &PluginConfig) -> bool {
+    config
+        .provider_mode
+        .as_deref()
+        .map(|mode| mode.eq_ignore_ascii_case("managed"))
+        .unwrap_or(true)
 }
 
-fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
-    fn decode_char(c: u8) -> Result<u8, &'static str> {
-        match c {
-            b'A'..=b'Z' => Ok(c - b'A'),
-            b'a'..=b'z' => Ok(c - b'a' + 26),
-            b'0'..=b'9' => Ok(c - b'0' + 52),
-            b'+' => Ok(62),
-            b'/' => Ok(63),
-            _ => Err("invalid base64 char"),
-        }
+fn config_from_update_params(params: &JsonValue) -> PluginConfig {
+    params
+        .get("config")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<PluginConfig>(value).ok())
+        .unwrap_or_else(load_config)
+}
+
+fn build_update_config_data(params: &JsonValue) -> Option<JsonValue> {
+    let config = config_from_update_params(params);
+    if !is_managed_mode(&config) {
+        return None;
     }
 
-    let input = input.trim_end_matches('=');
-    let mut result = Vec::with_capacity(input.len() * 3 / 4);
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b0 = decode_char(bytes[i])? as u32;
-        let b1 = if i + 1 < bytes.len() {
-            decode_char(bytes[i + 1])? as u32
-        } else {
-            0
-        };
-        let b2 = if i + 2 < bytes.len() {
-            decode_char(bytes[i + 2])? as u32
-        } else {
-            0
-        };
-        let b3 = if i + 3 < bytes.len() {
-            decode_char(bytes[i + 3])? as u32
-        } else {
-            0
-        };
-        let triple = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
-        result.push((triple >> 16) as u8);
-        if i + 2 < bytes.len() {
-            result.push((triple >> 8) as u8);
+    let hostname = params
+        .get("server_hostname")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    Some(serde_json::json!({
+        "plugin_permissions_patch": {
+            "plugin_id": "diaryx.ai",
+            "mode": "merge",
+            "permissions": {
+                "http_requests": {
+                    "include": [hostname],
+                    "exclude": []
+                }
+            }
         }
-        if i + 3 < bytes.len() {
-            result.push(triple as u8);
-        }
-        i += 4;
-    }
-    Ok(result)
+    }))
 }
 
 // ============================================================================
@@ -200,27 +87,38 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 #[plugin_fn]
 pub fn manifest(_input: String) -> FnResult<String> {
     let manifest = GuestManifest {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
         id: "diaryx.ai".into(),
         name: "AI Assistant".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         description: "AI chat assistant powered by OpenAI-compatible APIs".into(),
         capabilities: vec!["custom_commands".into()],
-        requested_permissions: Some(serde_json::json!({
-            "defaults": {
+        requested_permissions: Some(GuestRequestedPermissions {
+            defaults: serde_json::json!({
                 "http_requests": {
                     "include": ["openrouter.ai"],
+                    "exclude": []
+                },
+                "read_files": {
+                    "include": ["all"],
+                    "exclude": []
+                },
+                "edit_files": {
+                    "include": ["all"],
                     "exclude": []
                 },
                 "plugin_storage": {
                     "include": ["all"],
                     "exclude": []
                 }
-            },
-            "reasons": {
-                "http_requests": "Send chat requests to the configured OpenAI-compatible API endpoint.",
-                "plugin_storage": "Persist conversation history and plugin settings between sessions."
-            }
-        })),
+            }),
+            reasons: HashMap::from([
+                ("http_requests".into(), "Send chat requests to the configured OpenAI-compatible API endpoint.".into()),
+                ("plugin_storage".into(), "Persist conversation history and plugin settings between sessions.".into()),
+                ("read_files".into(), "Read existing conversation files so AI chat saves preserve Diaryx frontmatter and hierarchy metadata.".into()),
+                ("edit_files".into(), "Update the selected workspace conversation file with the latest chat transcript.".into()),
+            ]),
+        }),
         ui: vec![
             // Toolbar button to toggle the AI sidebar
             serde_json::json!({
@@ -312,6 +210,7 @@ pub fn manifest(_input: String) -> FnResult<String> {
             "switch_conversation".into(),
             "new_conversation".into(),
             "delete_conversation".into(),
+            "UpdateConfig".into(),
         ],
         cli: vec![],
     };
@@ -327,11 +226,7 @@ pub fn handle_command(input: String) -> FnResult<String> {
     let response = match request.command.as_str() {
         "get_component_html" => {
             // Return the chat UI HTML
-            CommandResponse {
-                success: true,
-                data: Some(JsonValue::String(include_str!("ui.html").to_string())),
-                error: None,
-            }
+            CommandResponse::ok(JsonValue::String(include_str!("ui.html").to_string()))
         }
         "chat" => {
             let chat_input: chat::ChatInput =
@@ -362,7 +257,19 @@ pub fn handle_command(input: String) -> FnResult<String> {
                 .unwrap_or("");
             chat::switch_conversation(id)
         }
-        "new_conversation" => chat::new_conversation(),
+        "new_conversation" => {
+            let title = request
+                .params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let file_path = request
+                .params
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            chat::new_conversation(title, file_path)
+        }
         "delete_conversation" => {
             let id = request
                 .params
@@ -371,11 +278,13 @@ pub fn handle_command(input: String) -> FnResult<String> {
                 .unwrap_or("");
             chat::delete_conversation(id)
         }
-        _ => CommandResponse {
-            success: false,
-            data: None,
-            error: Some(format!("Unknown command: {}", request.command)),
+        "UpdateConfig" => CommandResponse {
+            success: true,
+            data: build_update_config_data(&request.params),
+            error: None,
+            error_code: None,
         },
+        _ => CommandResponse::err(format!("Unknown command: {}", request.command)),
     };
 
     Ok(serde_json::to_string(&response)?)
@@ -400,4 +309,41 @@ pub fn set_config(input: String) -> FnResult<String> {
     let config: PluginConfig = serde_json::from_str(&input).unwrap_or_default();
     save_config(&config);
     Ok(String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_config_generates_permission_patch_for_managed_mode() {
+        let data = build_update_config_data(&serde_json::json!({
+            "config": {
+                "provider_mode": "managed"
+            },
+            "server_hostname": "sync.example"
+        }))
+        .expect("expected permission patch");
+
+        assert_eq!(
+            data["plugin_permissions_patch"]["mode"].as_str(),
+            Some("merge")
+        );
+        assert_eq!(
+            data["plugin_permissions_patch"]["permissions"]["http_requests"]["include"][0]
+                .as_str(),
+            Some("sync.example")
+        );
+    }
+
+    #[test]
+    fn update_config_is_noop_for_non_managed_mode() {
+        assert!(build_update_config_data(&serde_json::json!({
+            "config": {
+                "provider_mode": "byo"
+            },
+            "server_hostname": "sync.example"
+        }))
+        .is_none());
+    }
 }

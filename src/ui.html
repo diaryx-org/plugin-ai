@@ -464,6 +464,167 @@
     border-radius: 3px;
     font-size: 10px;
   }
+
+  /* New conversation modal */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: color-mix(in srgb, var(--bg) 55%, black);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 10;
+  }
+
+  .modal-backdrop.visible {
+    display: flex;
+  }
+
+  .modal {
+    width: min(100%, 460px);
+    max-height: calc(100vh - 32px);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 16px 40px color-mix(in srgb, black 18%, transparent);
+  }
+
+  .modal-header, .modal-footer {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .modal-footer {
+    border-bottom: none;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .modal-body {
+    padding: 14px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .modal-title {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .modal-subtitle {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .field-label {
+    font-size: 12px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    display: block;
+  }
+
+  .modal-input {
+    width: 100%;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--input-border);
+    border-radius: 10px;
+    padding: 8px 10px;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .modal-input:focus {
+    border-color: var(--ring);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 20%, transparent);
+  }
+
+  .tree-picker {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+
+  .tree-node {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    border: none;
+    background: none;
+    color: var(--fg);
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+    font-size: 12px;
+  }
+
+  .tree-node:hover {
+    background: var(--accent-bg);
+  }
+
+  .tree-node.selected {
+    background: var(--accent-bg);
+    box-shadow: inset 0 0 0 1px var(--ring);
+  }
+
+  .tree-toggle {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .tree-toggle:hover {
+    background: var(--accent-bg);
+  }
+
+  .tree-spacer {
+    width: 18px;
+    flex-shrink: 0;
+  }
+
+  .modal-error {
+    font-size: 12px;
+    color: var(--error-fg);
+  }
+
+  .modal-btn {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .modal-btn.primary {
+    background: var(--btn-bg);
+    border-color: transparent;
+    color: var(--btn-fg);
+  }
+
+  .modal-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 </style>
 </head>
 <body>
@@ -496,6 +657,30 @@
     <button id="send-btn">Send</button>
   </div>
 
+  <div class="modal-backdrop" id="conversation-modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="conversation-modal-title">
+      <div class="modal-header">
+        <div class="modal-title" id="conversation-modal-title">New conversation file</div>
+        <div class="modal-subtitle">Choose where to add this conversation in your contents hierarchy.</div>
+      </div>
+      <div class="modal-body">
+        <div>
+          <label class="field-label" for="conversation-title-input">Title</label>
+          <input class="modal-input" id="conversation-title-input" type="text" placeholder="Conversation title" />
+        </div>
+        <div>
+          <div class="field-label">Parent entry</div>
+          <div class="tree-picker" id="conversation-parent-tree"></div>
+        </div>
+        <div class="modal-error" id="conversation-modal-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn" id="conversation-modal-cancel" type="button">Cancel</button>
+        <button class="modal-btn primary" id="conversation-modal-create" type="button">Create</button>
+      </div>
+    </div>
+  </div>
+
 <script>
   const messagesEl = document.getElementById('messages');
   const emptyState = document.getElementById('empty-state');
@@ -507,15 +692,27 @@
   const newChatBtn = document.getElementById('new-chat-btn');
   const toggleListBtn = document.getElementById('toggle-list-btn');
   const conversationListEl = document.getElementById('conversation-list');
+  const modalBackdrop = document.getElementById('conversation-modal-backdrop');
+  const modalTitleInput = document.getElementById('conversation-title-input');
+  const modalParentTree = document.getElementById('conversation-parent-tree');
+  const modalErrorEl = document.getElementById('conversation-modal-error');
+  const modalCancelBtn = document.getElementById('conversation-modal-cancel');
+  const modalCreateBtn = document.getElementById('conversation-modal-create');
 
   let includeContext = false;
   let isLoading = false;
   let requestIdCounter = 0;
   const pendingRequests = new Map();
+  let hostActionIdCounter = 0;
+  const pendingHostActions = new Map();
   let currentEntry = null;
   let hasMessages = false;
   let activeConversationId = null;
   let listVisible = false;
+  let conversationPickerExpanded = new Set();
+  let conversationPickerTree = null;
+  let selectedParentPath = null;
+  let pendingConversationPrompt = null;
 
   // Toggle context inclusion
   contextToggle.addEventListener('click', () => {
@@ -532,14 +729,182 @@
     }
   }
 
+  function suggestConversationTitle(message) {
+    const trimmed = (message || '').trim();
+    if (!trimmed) return '';
+    return trimmed.length <= 60 ? trimmed : trimmed.slice(0, 60).trimEnd() + '...';
+  }
+
+  function getNodeDisplayName(node) {
+    return (node?.name || '').replace(/\.md$/, '');
+  }
+
+  function toggleConversationNode(path) {
+    if (conversationPickerExpanded.has(path)) {
+      conversationPickerExpanded.delete(path);
+    } else {
+      conversationPickerExpanded.add(path);
+    }
+    conversationPickerExpanded = new Set(conversationPickerExpanded);
+    renderConversationTree();
+  }
+
+  function renderConversationTree() {
+    modalParentTree.innerHTML = '';
+    if (!conversationPickerTree) return;
+    renderConversationTreeNode(conversationPickerTree, 0, modalParentTree);
+  }
+
+  function renderConversationTreeNode(node, depth, parentEl) {
+    const wrapper = document.createElement('div');
+
+    const row = document.createElement('div');
+    row.style.paddingLeft = (depth * 12) + 'px';
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+
+    if (node.children && node.children.length > 0) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'tree-toggle';
+      toggle.textContent = conversationPickerExpanded.has(node.path) ? '▾' : '▸';
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleConversationNode(node.path);
+      });
+      row.appendChild(toggle);
+    } else {
+      const spacer = document.createElement('span');
+      spacer.className = 'tree-spacer';
+      row.appendChild(spacer);
+    }
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tree-node' + (selectedParentPath === node.path ? ' selected' : '');
+    button.textContent = getNodeDisplayName(node);
+    button.addEventListener('click', () => {
+      selectedParentPath = node.path;
+      renderConversationTree();
+    });
+    row.appendChild(button);
+
+    wrapper.appendChild(row);
+
+    if (node.children && node.children.length > 0 && conversationPickerExpanded.has(node.path)) {
+      node.children
+        .filter((child) => !(child.name || '').startsWith('... ('))
+        .forEach((child) => renderConversationTreeNode(child, depth + 1, wrapper));
+    }
+
+    parentEl.appendChild(wrapper);
+  }
+
+  function closeConversationPrompt(result) {
+    modalBackdrop.classList.remove('visible');
+    modalErrorEl.textContent = '';
+    const resolver = pendingConversationPrompt;
+    pendingConversationPrompt = null;
+    if (resolver) resolver(result);
+  }
+
+  async function openConversationPrompt(initialTitle) {
+    if (pendingConversationPrompt) return null;
+
+    const tree = await sendHostAction('get-workspace-tree', {});
+    if (!tree || !tree.path) {
+      throw new Error('Unable to load the workspace contents tree');
+    }
+
+    conversationPickerTree = tree;
+    conversationPickerExpanded = new Set([tree.path]);
+    selectedParentPath = tree.path;
+    modalTitleInput.value = initialTitle || '';
+    modalErrorEl.textContent = '';
+    renderConversationTree();
+    modalBackdrop.classList.add('visible');
+
+    requestAnimationFrame(() => {
+      modalTitleInput.focus();
+      modalTitleInput.select();
+    });
+
+    return new Promise((resolve) => {
+      pendingConversationPrompt = resolve;
+    });
+  }
+
+  async function createConversationFromPrompt() {
+    const title = modalTitleInput.value.trim();
+    if (!title) {
+      modalErrorEl.textContent = 'Please enter a title.';
+      modalTitleInput.focus();
+      return;
+    }
+    if (!selectedParentPath) {
+      modalErrorEl.textContent = 'Please choose a parent entry.';
+      return;
+    }
+
+    modalErrorEl.textContent = '';
+    modalCreateBtn.disabled = true;
+
+    try {
+      const file = await sendHostAction('create-ai-conversation-entry', {
+        title,
+        parentPath: selectedParentPath,
+      });
+      const result = await sendPluginCommand('new_conversation', {
+        title,
+        file_path: file.path,
+      });
+      if (!result || !result.success || !result.data) {
+        throw new Error((result && result.error) || 'Failed to start conversation');
+      }
+
+      activeConversationId = result.data.id || null;
+      clearMessagesUI();
+      headerTitle.textContent = title;
+      if (listVisible) await refreshConversationList();
+      closeConversationPrompt(result.data);
+    } catch (err) {
+      modalErrorEl.textContent = err.message || String(err);
+    } finally {
+      modalCreateBtn.disabled = false;
+    }
+  }
+
+  async function ensureConversationReady(message) {
+    if (activeConversationId) return true;
+    try {
+      const created = await openConversationPrompt(suggestConversationTitle(message));
+      return !!created;
+    } catch (err) {
+      await showHostToast(err.message || String(err), 'error');
+      return false;
+    }
+  }
+
   // Header bar buttons
   newChatBtn.addEventListener('click', async () => {
     if (isLoading) return;
-    await sendPluginCommand('new_conversation', {});
-    activeConversationId = null;
-    clearMessagesUI();
-    headerTitle.textContent = 'New chat';
-    if (listVisible) await refreshConversationList();
+    try {
+      await openConversationPrompt('');
+    } catch (err) {
+      await showHostToast(err.message || String(err), 'error');
+    }
+  });
+
+  modalCancelBtn.addEventListener('click', () => closeConversationPrompt(null));
+  modalCreateBtn.addEventListener('click', createConversationFromPrompt);
+  modalTitleInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      createConversationFromPrompt();
+    }
+  });
+  modalBackdrop.addEventListener('click', (e) => {
+    if (e.target === modalBackdrop) closeConversationPrompt(null);
   });
 
   toggleListBtn.addEventListener('click', async () => {
@@ -586,7 +951,7 @@
       deleteBtn.title = 'Delete conversation';
       deleteBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        await deleteConversation(conv.id);
+        await deleteConversation(conv);
       });
 
       item.appendChild(info);
@@ -619,10 +984,39 @@
     if (listVisible) await refreshConversationList();
   }
 
-  async function deleteConversation(id) {
-    await sendPluginCommand('delete_conversation', { id });
+  async function deleteConversation(conversation) {
+    if (!conversation || !conversation.id) return;
+    let confirmed = false;
+    try {
+      confirmed = !!(await sendHostAction('confirm', {
+        title: 'Delete conversation',
+        description:
+          'Are you sure you want to delete "' +
+          (conversation.title || 'Untitled') +
+          '" and its workspace file? This action cannot be undone.',
+        confirmLabel: 'Delete',
+        cancelLabel: 'Cancel',
+        variant: 'destructive',
+      }));
+    } catch (err) {
+      await showHostToast(err.message || String(err), 'error');
+      return;
+    }
 
-    if (id === activeConversationId) {
+    if (!confirmed) return;
+
+    try {
+      if (conversation.file_path) {
+        await sendHostAction('delete-entry', { path: conversation.file_path });
+      }
+
+      await sendPluginCommand('delete_conversation', { id: conversation.id });
+    } catch (err) {
+      await showHostToast(err.message || String(err), 'error');
+      return;
+    }
+
+    if (conversation.id === activeConversationId) {
       activeConversationId = null;
       clearMessagesUI();
       headerTitle.textContent = 'New chat';
@@ -676,6 +1070,10 @@
     if (!message || isLoading) return;
 
     const isNewChat = !activeConversationId;
+
+    if (!(await ensureConversationReady(message))) {
+      return;
+    }
 
     inputEl.value = '';
     inputEl.style.height = 'auto';
@@ -883,6 +1281,33 @@
     });
   }
 
+  function sendHostAction(type, payload) {
+    return new Promise((resolve, reject) => {
+      const requestId = ++hostActionIdCounter;
+      pendingHostActions.set(requestId, { resolve, reject });
+      parent.postMessage({
+        type: 'host-action',
+        action: { type, payload },
+        requestId,
+      }, '*');
+
+      setTimeout(() => {
+        const pending = pendingHostActions.get(requestId);
+        if (!pending) return;
+        pendingHostActions.delete(requestId);
+        reject(new Error('Host action timed out'));
+      }, 120000);
+    });
+  }
+
+  async function showHostToast(message, variant = 'error', description) {
+    try {
+      await sendHostAction('show-toast', { message, variant, description });
+    } catch (err) {
+      console.error('[AI plugin] Failed to show host toast:', err, message);
+    }
+  }
+
   // Apply host CSS variables to local theme variables
   function applyTheme(theme, cssVars) {
     if (theme === 'dark') {
@@ -942,6 +1367,18 @@
       if (resolve) {
         pendingRequests.delete(data.requestId);
         resolve(data.result);
+      }
+    }
+
+    if (data.type === 'host-action-response' && data.requestId) {
+      const pending = pendingHostActions.get(data.requestId);
+      if (pending) {
+        pendingHostActions.delete(data.requestId);
+        if (data.success) {
+          pending.resolve(data.data);
+        } else {
+          pending.reject(new Error(data.error || 'Host action failed'));
+        }
       }
     }
 

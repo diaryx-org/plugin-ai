@@ -2,7 +2,7 @@
 title: "AI Assistant"
 description: "AI chat assistant powered by OpenAI-compatible APIs"
 id: "diaryx.ai"
-version: "0.1.0"
+version: "0.1.1"
 author: "Diaryx Team"
 license: "PolyForm Shield 1.0.0"
 repository: "https://github.com/diaryx-org/plugin-ai"
@@ -28,11 +28,17 @@ requested_permissions:
   defaults:
     http_requests:
       include: ["openrouter.ai"]
+    read_files:
+      include: ["all"]
+    edit_files:
+      include: ["all"]
     plugin_storage:
       include: ["all"]
   reasons:
     http_requests: "Send chat requests to the configured OpenAI-compatible API endpoint."
     plugin_storage: "Persist conversation history and plugin settings between sessions."
+    read_files: "Read existing conversation files so AI chat saves preserve Diaryx frontmatter and hierarchy metadata."
+    edit_files: "Update the selected workspace conversation file with the latest chat transcript."
 ---
 
 # diaryx_ai_extism
@@ -43,6 +49,8 @@ requested_permissions:
 
 - AI chat sidebar UI rendered via plugin iframe (`get_component_html`)
 - Multi-conversation history persisted in plugin storage
+- New conversations prompt for a workspace file and are added to the contents hierarchy
+- Chat transcripts are mirrored into the selected workspace file while preserving frontmatter metadata
 - Tool-use loop for reading files (`read_file`, `list_files`)
 - Explicit per-request HTTP timeout for chat provider calls (avoids indefinite hangs)
 - Two provider modes:
