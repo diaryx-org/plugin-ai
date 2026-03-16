@@ -86,134 +86,132 @@ fn build_update_config_data(params: &JsonValue) -> Option<JsonValue> {
 /// Return the plugin manifest.
 #[plugin_fn]
 pub fn manifest(_input: String) -> FnResult<String> {
-    let manifest = GuestManifest {
-        protocol_version: CURRENT_PROTOCOL_VERSION,
-        id: "diaryx.ai".into(),
-        name: "AI Assistant".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        description: "AI chat assistant powered by OpenAI-compatible APIs".into(),
-        capabilities: vec!["custom_commands".into()],
-        requested_permissions: Some(GuestRequestedPermissions {
-            defaults: serde_json::json!({
-                "http_requests": {
-                    "include": ["openrouter.ai"],
-                    "exclude": []
-                },
-                "read_files": {
-                    "include": ["all"],
-                    "exclude": []
-                },
-                "edit_files": {
-                    "include": ["all"],
-                    "exclude": []
-                },
-                "plugin_storage": {
-                    "include": ["all"],
-                    "exclude": []
-                }
-            }),
-            reasons: HashMap::from([
-                ("http_requests".into(), "Send chat requests to the configured OpenAI-compatible API endpoint.".into()),
-                ("plugin_storage".into(), "Persist conversation history and plugin settings between sessions.".into()),
-                ("read_files".into(), "Read existing conversation files so AI chat saves preserve Diaryx frontmatter and hierarchy metadata.".into()),
-                ("edit_files".into(), "Update the selected workspace conversation file with the latest chat transcript.".into()),
-            ]),
+    let manifest = GuestManifest::new(
+        "diaryx.ai".into(),
+        "AI Assistant".into(),
+        env!("CARGO_PKG_VERSION").into(),
+        "AI chat assistant powered by OpenAI-compatible APIs".into(),
+        vec!["custom_commands".into()],
+    )
+    .ui(vec![
+        // Toolbar button to toggle the AI sidebar
+        serde_json::json!({
+            "slot": "ToolbarButton",
+            "id": "ai-chat-toggle",
+            "label": "AI Assistant",
+            "icon": "sparkles",
+            "plugin_command": "toggle_ai",
         }),
-        ui: vec![
-            // Toolbar button to toggle the AI sidebar
-            serde_json::json!({
-                "slot": "ToolbarButton",
-                "id": "ai-chat-toggle",
-                "label": "AI Assistant",
-                "icon": "sparkles",
-                "plugin_command": "toggle_ai",
-            }),
-            // Right sidebar tab with iframe-based chat UI
-            serde_json::json!({
-                "slot": "SidebarTab",
-                "id": "ai-chat",
-                "label": "AI",
-                "icon": "sparkles",
-                "side": "Right",
-                "component": {
-                    "type": "Iframe",
-                    "component_id": "ai-chat-ui",
+        // Right sidebar tab with iframe-based chat UI
+        serde_json::json!({
+            "slot": "SidebarTab",
+            "id": "ai-chat",
+            "label": "AI",
+            "icon": "sparkles",
+            "side": "Right",
+            "component": {
+                "type": "Iframe",
+                "component_id": "ai-chat-ui",
+            },
+        }),
+        // Settings tab for API configuration
+        serde_json::json!({
+            "slot": "SettingsTab",
+            "id": "ai-settings",
+            "label": "AI",
+            "icon": "sparkles",
+            "fields": [
+                {
+                    "type": "Section",
+                    "label": "AI Configuration",
+                    "description": "Configure your AI assistant API connection",
                 },
-            }),
-            // Settings tab for API configuration
-            serde_json::json!({
-                "slot": "SettingsTab",
-                "id": "ai-settings",
-                "label": "AI",
-                "icon": "sparkles",
-                "fields": [
-                    {
-                        "type": "Section",
-                        "label": "AI Configuration",
-                        "description": "Configure your AI assistant API connection",
-                    },
-                    {
-                        "type": "Select",
-                        "key": "provider_mode",
-                        "label": "Provider",
-                        "description": "Choose Diaryx Plus managed AI or use your own API key",
-                        "options": [
-                            { "value": "managed", "label": "Diaryx Plus (managed)" },
-                            { "value": "byo", "label": "Bring your own API key" }
-                        ],
-                    },
-                    {
-                        "type": "Select",
-                        "key": "managed_model",
-                        "label": "Diaryx Plus Model",
-                        "description": "Model used for managed mode",
-                        "options": [
-                            { "value": "google/gemini-3-flash-preview", "label": "Gemini 3 Flash Preview" },
-                            { "value": "anthropic/claude-haiku-4.5", "label": "Claude Haiku 4.5" },
-                            { "value": "openai/gpt-5.2", "label": "OpenAI GPT-5.2" }
-                        ],
-                    },
-                    {
-                        "type": "Text",
-                        "key": "api_endpoint",
-                        "label": "API Endpoint",
-                        "description": "OpenAI-compatible endpoint for BYO mode (default: OpenRouter)",
-                    },
-                    {
-                        "type": "Text",
-                        "key": "api_key",
-                        "label": "API Key",
-                        "description": "Your API key (BYO mode only)",
-                    },
-                    {
-                        "type": "Text",
-                        "key": "model",
-                        "label": "Model",
-                        "description": "BYO model, e.g. anthropic/claude-sonnet-4-6",
-                    },
-                    {
-                        "type": "Text",
-                        "key": "system_prompt",
-                        "label": "System Prompt",
-                        "description": "Custom instructions for the AI",
-                    },
-                ],
-            }),
-        ],
-        commands: vec![
-            "chat".into(),
-            "chat_continue".into(),
-            "clear_conversation".into(),
-            "get_history".into(),
-            "get_component_html".into(),
-            "list_conversations".into(),
-            "switch_conversation".into(),
-            "new_conversation".into(),
-            "delete_conversation".into(),
-            "UpdateConfig".into(),
-        ],
-        cli: vec![],
-    };
+                {
+                    "type": "Select",
+                    "key": "provider_mode",
+                    "label": "Provider",
+                    "description": "Choose Diaryx Plus managed AI or use your own API key",
+                    "options": [
+                        { "value": "managed", "label": "Diaryx Plus (managed)" },
+                        { "value": "byo", "label": "Bring your own API key" }
+                    ],
+                },
+                {
+                    "type": "Select",
+                    "key": "managed_model",
+                    "label": "Diaryx Plus Model",
+                    "description": "Model used for managed mode",
+                    "options": [
+                        { "value": "google/gemini-3-flash-preview", "label": "Gemini 3 Flash Preview" },
+                        { "value": "anthropic/claude-haiku-4.5", "label": "Claude Haiku 4.5" },
+                        { "value": "openai/gpt-5.2", "label": "OpenAI GPT-5.2" }
+                    ],
+                },
+                {
+                    "type": "Text",
+                    "key": "api_endpoint",
+                    "label": "API Endpoint",
+                    "description": "OpenAI-compatible endpoint for BYO mode (default: OpenRouter)",
+                },
+                {
+                    "type": "Text",
+                    "key": "api_key",
+                    "label": "API Key",
+                    "description": "Your API key (BYO mode only)",
+                },
+                {
+                    "type": "Text",
+                    "key": "model",
+                    "label": "Model",
+                    "description": "BYO model, e.g. anthropic/claude-sonnet-4-6",
+                },
+                {
+                    "type": "Text",
+                    "key": "system_prompt",
+                    "label": "System Prompt",
+                    "description": "Custom instructions for the AI",
+                },
+            ],
+        }),
+    ])
+    .commands(vec![
+        "chat".into(),
+        "chat_continue".into(),
+        "clear_conversation".into(),
+        "get_history".into(),
+        "get_component_html".into(),
+        "list_conversations".into(),
+        "switch_conversation".into(),
+        "new_conversation".into(),
+        "delete_conversation".into(),
+        "UpdateConfig".into(),
+    ])
+    .requested_permissions(GuestRequestedPermissions {
+        defaults: serde_json::json!({
+            "http_requests": {
+                "include": ["openrouter.ai"],
+                "exclude": []
+            },
+            "read_files": {
+                "include": ["all"],
+                "exclude": []
+            },
+            "edit_files": {
+                "include": ["all"],
+                "exclude": []
+            },
+            "plugin_storage": {
+                "include": ["all"],
+                "exclude": []
+            }
+        }),
+        reasons: HashMap::from([
+            ("http_requests".into(), "Send chat requests to the configured OpenAI-compatible API endpoint.".into()),
+            ("plugin_storage".into(), "Persist conversation history and plugin settings between sessions.".into()),
+            ("read_files".into(), "Read existing conversation files so AI chat saves preserve Diaryx frontmatter and hierarchy metadata.".into()),
+            ("edit_files".into(), "Update the selected workspace conversation file with the latest chat transcript.".into()),
+        ]),
+    });
 
     Ok(serde_json::to_string(&manifest)?)
 }
