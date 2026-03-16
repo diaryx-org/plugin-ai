@@ -87,10 +87,10 @@ fn build_update_config_data(params: &JsonValue) -> Option<JsonValue> {
 #[plugin_fn]
 pub fn manifest(_input: String) -> FnResult<String> {
     let manifest = GuestManifest::new(
-        "diaryx.ai".into(),
-        "AI Assistant".into(),
-        env!("CARGO_PKG_VERSION").into(),
-        "AI chat assistant powered by OpenAI-compatible APIs".into(),
+        "diaryx.ai",
+        "AI Assistant",
+        env!("CARGO_PKG_VERSION"),
+        "AI chat assistant powered by OpenAI-compatible APIs",
         vec!["custom_commands".into()],
     )
     .ui(vec![
